@@ -18,6 +18,32 @@
         }
         canvas { display: block; }
         
+        /* Loading screen */
+        #loading {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #1a1a1a;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 200;
+        }
+        #loading h2 {
+            color: #666;
+            font-weight: normal;
+        }
+        #loading .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-top-color: #f80;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
         /* Menu overlay */
         #menu {
             position: absolute;
@@ -127,18 +153,25 @@
 </head>
 <body>
     <div id="game-container">
+        <!-- Loading -->
+        <div id="loading">
+            <div class="spinner"></div>
+            <h2>Loading physics...</h2>
+        </div>
+        
         <!-- Menu -->
-        <div id="menu">
+        <div id="menu" class="hidden">
             <h1>📦 The Warehouse</h1>
             <p>A collection of game development artifacts</p>
             <button onclick="startGame('tour')">🚂 Take the Tour</button>
             <button onclick="startGame('freeroam')">🚶 Free Roam</button>
+            <p style="margin-top: 2em; font-size: 0.8em; color: #555;">Tip: You can knock things over.</p>
         </div>
         
         <!-- HUD -->
         <div id="crosshair" class="hidden"></div>
         <div id="instructions" class="hidden">
-            WASD - Move | Mouse - Look | ESC - Menu
+            WASD - Move | Mouse - Look | SHIFT - Run | ESC - Menu
         </div>
         
         <!-- Narrator -->
@@ -150,24 +183,32 @@
 
     <!-- Three.js -->
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-    <!-- Rapier Physics (WASM) -->
-    <script src="https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.min.js"></script>
     
-    <script>
+    <script type="module">
+    // ============================================
+    // IMPORTS
+    // ============================================
+    import RAPIER from 'https://cdn.skypack.dev/@dimforge/rapier3d-compat';
+
     // ============================================
     // GAME STATE
     // ============================================
     const state = {
-        mode: null, // 'tour' or 'freeroam'
+        mode: null,
         playing: false,
-        physics: null,
-        bodies: [],
+        physicsReady: false,
+        cratesBumped: 0,
         narrator: {
             queue: [],
             current: null,
             timeout: null
         }
     };
+
+    // Physics world
+    let world;
+    let physicsObjects = []; // { mesh, rigidBody }
+    let playerBody;
 
     // ============================================
     // THREE.JS SETUP
@@ -191,8 +232,6 @@
     const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
     scene.add(ambientLight);
 
-    // Main overhead lights
-    const lights = [];
     for (let x = -8; x <= 8; x += 8) {
         const light = new THREE.SpotLight(0xffeedd, 50);
         light.position.set(x, 8, 0);
@@ -202,33 +241,26 @@
         light.shadow.mapSize.width = 512;
         light.shadow.mapSize.height = 512;
         scene.add(light);
-        lights.push(light);
     }
 
     // ============================================
     // WAREHOUSE GEOMETRY
     // ============================================
     const floorGeom = new THREE.PlaneGeometry(30, 30);
-    const floorMat = new THREE.MeshStandardMaterial({ 
-        color: 0x3a3a3a,
-        roughness: 0.9
-    });
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.9 });
     const floor = new THREE.Mesh(floorGeom, floorMat);
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     scene.add(floor);
 
-    // Walls
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x4a4a4a, roughness: 0.8 });
     const wallHeight = 10;
     const wallGeom = new THREE.PlaneGeometry(30, wallHeight);
     
-    // Back wall
     const backWall = new THREE.Mesh(wallGeom, wallMat);
     backWall.position.set(0, wallHeight/2, -15);
     scene.add(backWall);
     
-    // Side walls
     const leftWall = new THREE.Mesh(wallGeom, wallMat);
     leftWall.position.set(-15, wallHeight/2, 0);
     leftWall.rotation.y = Math.PI / 2;
@@ -240,12 +272,72 @@
     scene.add(rightWall);
 
     // ============================================
-    // ARTIFACTS & CRATES
+    // INIT PHYSICS
     // ============================================
-    const artifacts = [];
-    const crates = [];
+    async function initPhysics() {
+        await RAPIER.init();
+        
+        const gravity = { x: 0.0, y: -9.81, z: 0.0 };
+        world = new RAPIER.World(gravity);
+        
+        // Floor collider
+        const floorColliderDesc = RAPIER.ColliderDesc.cuboid(15, 0.1, 15);
+        world.createCollider(floorColliderDesc);
+        
+        // Walls
+        const wallThickness = 0.5;
+        // Back wall
+        const backWallDesc = RAPIER.ColliderDesc.cuboid(15, wallHeight/2, wallThickness)
+            .setTranslation(0, wallHeight/2, -15);
+        world.createCollider(backWallDesc);
+        // Left wall
+        const leftWallDesc = RAPIER.ColliderDesc.cuboid(wallThickness, wallHeight/2, 15)
+            .setTranslation(-15, wallHeight/2, 0);
+        world.createCollider(leftWallDesc);
+        // Right wall
+        const rightWallDesc = RAPIER.ColliderDesc.cuboid(wallThickness, wallHeight/2, 15)
+            .setTranslation(15, wallHeight/2, 0);
+        world.createCollider(rightWallDesc);
+        // Front wall (invisible)
+        const frontWallDesc = RAPIER.ColliderDesc.cuboid(15, wallHeight/2, wallThickness)
+            .setTranslation(0, wallHeight/2, 15);
+        world.createCollider(frontWallDesc);
+        
+        // Player body (kinematic)
+        const playerBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+            .setTranslation(0, 1, 8);
+        playerBody = world.createRigidBody(playerBodyDesc);
+        const playerColliderDesc = RAPIER.ColliderDesc.capsule(0.5, 0.3);
+        world.createCollider(playerColliderDesc, playerBody);
+        
+        // Create crates with physics
+        createPhysicsCrate(-10, 0.5, 5, 1);
+        createPhysicsCrate(-10, 1.6, 5, 0.8);
+        createPhysicsCrate(-10, 2.5, 5, 0.6);
+        createPhysicsCrate(-9, 0.5, 6, 1);
+        createPhysicsCrate(-11, 0.5, 4, 1.2);
+        
+        createPhysicsCrate(10, 0.5, -5, 1);
+        createPhysicsCrate(11, 0.5, -4, 0.8);
+        createPhysicsCrate(9, 0.5, -6, 1.1);
+        
+        // More crate stacks for fun
+        createPhysicsCrate(8, 0.5, 8, 1);
+        createPhysicsCrate(8, 1.5, 8, 1);
+        createPhysicsCrate(8, 2.5, 8, 1);
+        createPhysicsCrate(8, 3.5, 8, 0.8);
+        
+        createPhysicsCrate(-8, 0.4, -8, 0.8);
+        createPhysicsCrate(-8, 1.2, -8, 0.8);
+        createPhysicsCrate(-7.2, 0.4, -8, 0.8);
+        
+        state.physicsReady = true;
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('menu').classList.remove('hidden');
+    }
 
-    function createCrate(x, y, z, size = 1, color = 0x8B4513) {
+    function createPhysicsCrate(x, y, z, size, color = 0x8B4513) {
+        // Three.js mesh
         const geom = new THREE.BoxGeometry(size, size, size);
         const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7 });
         const mesh = new THREE.Mesh(geom, mat);
@@ -253,12 +345,28 @@
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         scene.add(mesh);
-        crates.push({ mesh, size });
-        return mesh;
+        
+        // Rapier rigid body
+        const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+            .setTranslation(x, y, z);
+        const rigidBody = world.createRigidBody(rigidBodyDesc);
+        
+        // Collider
+        const colliderDesc = RAPIER.ColliderDesc.cuboid(size/2, size/2, size/2)
+            .setDensity(1.0)
+            .setFriction(0.5)
+            .setRestitution(0.1);
+        world.createCollider(colliderDesc, rigidBody);
+        
+        physicsObjects.push({ mesh, rigidBody, originalY: y, hasFallen: false });
     }
 
+    // ============================================
+    // ARTIFACTS (static)
+    // ============================================
+    const artifacts = [];
+
     function createArtifact(x, y, z, name, description, color = 0xff6600) {
-        // Pedestal
         const pedestalGeom = new THREE.CylinderGeometry(0.5, 0.6, 0.3, 16);
         const pedestalMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
         const pedestal = new THREE.Mesh(pedestalGeom, pedestalMat);
@@ -266,7 +374,13 @@
         pedestal.castShadow = true;
         scene.add(pedestal);
         
-        // The artifact (placeholder cube for now)
+        // Pedestal collision
+        if (state.physicsReady) {
+            const pedestalColliderDesc = RAPIER.ColliderDesc.cylinder(0.15, 0.5)
+                .setTranslation(x, 0.15, z);
+            world.createCollider(pedestalColliderDesc);
+        }
+        
         const artifactGeom = new THREE.BoxGeometry(0.6, 0.6, 0.6);
         const artifactMat = new THREE.MeshStandardMaterial({ 
             color, 
@@ -285,11 +399,9 @@
         return artifact;
     }
 
-    // Shelving units
     function createShelf(x, z) {
         const shelfMat = new THREE.MeshStandardMaterial({ color: 0x5c4033 });
         
-        // Vertical posts
         for (let px of [-1, 1]) {
             const post = new THREE.Mesh(
                 new THREE.BoxGeometry(0.1, 3, 0.1),
@@ -300,7 +412,6 @@
             scene.add(post);
         }
         
-        // Shelves
         for (let sy of [0.5, 1.5, 2.5]) {
             const shelf = new THREE.Mesh(
                 new THREE.BoxGeometry(2.2, 0.05, 0.8),
@@ -311,39 +422,35 @@
             shelf.receiveShadow = true;
             scene.add(shelf);
         }
+        
+        // Shelf collision (simplified as box)
+        if (state.physicsReady) {
+            const shelfColliderDesc = RAPIER.ColliderDesc.cuboid(1.1, 1.5, 0.4)
+                .setTranslation(x, 1.5, z);
+            world.createCollider(shelfColliderDesc);
+        }
     }
 
-    // Place shelves
-    createShelf(-8, -10);
-    createShelf(-4, -10);
-    createShelf(4, -10);
-    createShelf(8, -10);
-
-    // Place crates (some stacked, some scattered)
-    createCrate(-10, 0.5, 5, 1);
-    createCrate(-10, 1.5, 5, 0.8);
-    createCrate(-10, 2.2, 5, 0.6);  // Precarious stack!
-    createCrate(-9, 0.5, 6, 1);
-    createCrate(-11, 0.5, 4, 1.2);
-
-    createCrate(10, 0.5, -5, 1);
-    createCrate(11, 0.5, -4, 0.8);
-    createCrate(9, 0.5, -6, 1.1);
-
-    // Place artifacts
-    createArtifact(0, 1, -5, "C64 Palette Shader", 
-        "A popular Godot shader that remaps colors to the classic Commodore 64 palette. Over 500 downloads!", 0x4488ff);
-    createArtifact(-5, 1, 0, "Muscle Car Model", 
-        "A 1969 Mustang from an unreleased racing prototype. The physics were too realistic.", 0xff4444);
-    createArtifact(5, 1, 0, "Pixel Knight", 
-        "Main character from a platformer that never shipped. He still waits for his adventure.", 0x44ff44);
-    createArtifact(0, 1, 5, "Mystery Box", 
-        "Even I don't know what's in here. Some prototypes are best left forgotten...", 0x888888);
+    function createStaticObjects() {
+        createShelf(-8, -10);
+        createShelf(-4, -10);
+        createShelf(4, -10);
+        createShelf(8, -10);
+        
+        createArtifact(0, 1, -5, "C64 Palette Shader", 
+            "A popular Godot shader that remaps colors to the classic Commodore 64 palette.", 0x4488ff);
+        createArtifact(-5, 1, 0, "Muscle Car Model", 
+            "A 1969 Mustang from an unreleased racing prototype.", 0xff4444);
+        createArtifact(5, 1, 0, "Pixel Knight", 
+            "Main character from a platformer that never shipped.", 0x44ff44);
+        createArtifact(0, 1, 5, "Mystery Box", 
+            "Some prototypes are best left forgotten...", 0x888888);
+    }
 
     // ============================================
     // FIRST PERSON CONTROLS
     // ============================================
-    const movement = { forward: 0, right: 0 };
+    const movement = { forward: 0, right: 0, sprint: false };
     const euler = new THREE.Euler(0, 0, 0, 'YXZ');
     let isLocked = false;
 
@@ -354,6 +461,7 @@
             case 'KeyS': movement.forward = -1; break;
             case 'KeyA': movement.right = -1; break;
             case 'KeyD': movement.right = 1; break;
+            case 'ShiftLeft': case 'ShiftRight': movement.sprint = true; break;
             case 'Escape': exitGame(); break;
         }
     });
@@ -362,6 +470,7 @@
         switch(e.code) {
             case 'KeyW': case 'KeyS': movement.forward = 0; break;
             case 'KeyA': case 'KeyD': movement.right = 0; break;
+            case 'ShiftLeft': case 'ShiftRight': movement.sprint = false; break;
         }
     });
 
@@ -394,12 +503,26 @@
     const narratorLines = {
         welcome: "Ah, welcome! Welcome to the warehouse. Mind your step – some of these prototypes are... temperamental.",
         tour_start: "Let me show you around. We have quite the collection here.",
-        crate_bump: ["Careful there!", "Oh! Those are fragile... well, not really.", "I was going to reorganize those anyway.", "That's coming out of your deposit."],
+        crate_bump: [
+            "Careful there!", 
+            "Oh! Those are fragile... well, not really.", 
+            "I was going to reorganize those anyway.", 
+            "That's coming out of your deposit.",
+            "The insurance doesn't cover visitor-induced chaos.",
+            "*sigh* I just stacked those.",
+            "You know those are antique shipping containers, right? ...No? Just me?"
+        ],
+        crate_chaos: [
+            "Are you... are you doing this on purpose?",
+            "I'm starting to think you weren't actually here for the tour.",
+            "Security! ...oh wait, I am security.",
+            "This is why we can't have nice things."
+        ],
         artifact_c64: "Ah, the C64 Palette Shader! A labor of love for the retro enthusiast. Godot developers seem to enjoy it.",
         artifact_car: "The Muscle Car. Beautiful, isn't she? The handling was too realistic – players kept crashing.",
         artifact_knight: "Sir Pixel, the knight who never got his quest. Perhaps someday...",
         artifact_mystery: "I wouldn't touch that one if I were you. Some code is best left uncompiled.",
-        freeroam_intro: "Feel free to explore. Touch whatever you like. I'll be watching.",
+        freeroam_intro: "Feel free to explore. Touch whatever you like. ...Within reason.",
     };
 
     function narrate(key, immediate = false) {
@@ -436,7 +559,7 @@
     }
 
     // ============================================
-    // TOUR MODE (Rail camera)
+    // TOUR MODE
     // ============================================
     const tourPath = [
         { pos: [0, 1.7, 10], look: [0, 1, -5], duration: 2, action: () => narrate('welcome') },
@@ -451,7 +574,6 @@
 
     function updateTour(delta) {
         if (tourIndex >= tourPath.length - 1) {
-            // Tour complete, switch to free roam
             state.mode = 'freeroam';
             narrate('freeroam_intro');
             document.getElementById('instructions').classList.remove('hidden');
@@ -472,7 +594,6 @@
             return;
         }
         
-        // Smooth interpolation
         const t = smoothstep(tourProgress);
         
         camera.position.lerpVectors(
@@ -492,14 +613,47 @@
     }
 
     // ============================================
+    // PHYSICS UPDATE
+    // ============================================
+    function updatePhysics(delta) {
+        if (!state.physicsReady) return;
+        
+        // Step physics
+        world.step();
+        
+        // Sync meshes to physics bodies
+        for (const obj of physicsObjects) {
+            const pos = obj.rigidBody.translation();
+            const rot = obj.rigidBody.rotation();
+            
+            obj.mesh.position.set(pos.x, pos.y, pos.z);
+            obj.mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+            
+            // Check if crate fell
+            if (!obj.hasFallen && pos.y < obj.originalY - 0.5) {
+                obj.hasFallen = true;
+                state.cratesBumped++;
+                
+                // Trigger narrator reaction
+                if (state.cratesBumped <= 3) {
+                    narrate('crate_bump');
+                } else if (state.cratesBumped === 5 || state.cratesBumped === 8) {
+                    narrate('crate_chaos');
+                }
+            }
+        }
+    }
+
+    // ============================================
     // GAME LOOP
     // ============================================
     const clock = new THREE.Clock();
+    let lastPlayerPos = new THREE.Vector3();
 
     function animate() {
         requestAnimationFrame(animate);
         
-        const delta = clock.getDelta();
+        const delta = Math.min(clock.getDelta(), 0.1); // Cap delta to prevent physics explosion
         
         if (state.playing) {
             if (state.mode === 'tour') {
@@ -508,7 +662,9 @@
                 updateFreeroam(delta);
             }
             
-            // Rotate artifacts gently
+            updatePhysics(delta);
+            
+            // Rotate artifacts
             artifacts.forEach(a => {
                 a.rotation.y += delta * 0.5;
             });
@@ -518,9 +674,11 @@
     }
 
     function updateFreeroam(delta) {
-        const speed = 5;
-        const direction = new THREE.Vector3();
+        const baseSpeed = 4;
+        const sprintMultiplier = movement.sprint ? 2 : 1;
+        const speed = baseSpeed * sprintMultiplier;
         
+        const direction = new THREE.Vector3();
         camera.getWorldDirection(direction);
         direction.y = 0;
         direction.normalize();
@@ -528,15 +686,24 @@
         const right = new THREE.Vector3();
         right.crossVectors(direction, new THREE.Vector3(0, 1, 0));
         
-        camera.position.addScaledVector(direction, movement.forward * speed * delta);
-        camera.position.addScaledVector(right, movement.right * speed * delta);
+        // Calculate new position
+        const newPos = camera.position.clone();
+        newPos.addScaledVector(direction, movement.forward * speed * delta);
+        newPos.addScaledVector(right, movement.right * speed * delta);
         
-        // Keep within bounds
-        camera.position.x = Math.max(-14, Math.min(14, camera.position.x));
-        camera.position.z = Math.max(-14, Math.min(14, camera.position.z));
-        camera.position.y = 1.7;
+        // Clamp to bounds
+        newPos.x = Math.max(-14, Math.min(14, newPos.x));
+        newPos.z = Math.max(-14, Math.min(14, newPos.z));
+        newPos.y = 1.7;
         
-        // Check proximity to artifacts
+        // Update camera
+        camera.position.copy(newPos);
+        
+        // Update player physics body (this pushes crates!)
+        if (playerBody) {
+            playerBody.setNextKinematicTranslation({ x: newPos.x, y: 1, z: newPos.z });
+        }
+        
         checkArtifactProximity();
     }
 
@@ -565,38 +732,39 @@
     }
 
     // ============================================
-    // GAME STATE MANAGEMENT
+    // GAME STATE
     // ============================================
-    function startGame(mode) {
+    window.startGame = function(mode) {
         state.mode = mode;
         state.playing = true;
+        state.cratesBumped = 0;
         
         document.getElementById('menu').classList.add('hidden');
         document.getElementById('crosshair').classList.remove('hidden');
         
         camera.position.set(0, 1.7, 10);
         camera.lookAt(0, 1, -5);
+        euler.set(0, 0, 0);
         tourIndex = 0;
         tourProgress = 0;
         
         if (mode === 'tour') {
-            narrate('tour_start');
             if (tourPath[0]?.action) tourPath[0].action();
         } else {
             narrate('freeroam_intro');
             document.getElementById('instructions').classList.remove('hidden');
             renderer.domElement.requestPointerLock();
         }
-    }
+    };
 
-    function exitGame() {
+    window.exitGame = function() {
         state.playing = false;
         document.exitPointerLock();
         document.getElementById('menu').classList.remove('hidden');
         document.getElementById('crosshair').classList.add('hidden');
         document.getElementById('instructions').classList.add('hidden');
         narratorEl.classList.remove('visible');
-    }
+    };
 
     // ============================================
     // WINDOW RESIZE
@@ -608,9 +776,12 @@
     });
 
     // ============================================
-    // START
+    // INIT
     // ============================================
-    animate();
+    initPhysics().then(() => {
+        createStaticObjects();
+        animate();
+    });
     </script>
 </body>
 </html>
