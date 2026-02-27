@@ -200,6 +200,16 @@
     // IMPORTS
     // ============================================
     import RAPIER from 'https://cdn.skypack.dev/@dimforge/rapier3d-compat';
+    
+    // Post-processing
+    import { EffectComposer } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/RenderPass.js';
+    import { SSAOPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/SSAOPass.js';
+    import { OutputPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/OutputPass.js';
+    import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js';
+    
+    // GLTF loader for future model imports
+    import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
 
     // ============================================
     // GAME STATE
@@ -265,6 +275,36 @@
         light.shadow.mapSize.height = 512;
         scene.add(light);
     }
+
+    // ============================================
+    // POST-PROCESSING
+    // ============================================
+    const composer = new EffectComposer(renderer);
+    
+    // Base render pass
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+    
+    // SSAO - Ambient Occlusion
+    const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+    ssaoPass.kernelRadius = 0.5;      // How far AO reaches
+    ssaoPass.minDistance = 0.001;     // Near clip for AO
+    ssaoPass.maxDistance = 0.1;       // Far clip for AO
+    ssaoPass.output = SSAOPass.OUTPUT.Default;
+    composer.addPass(ssaoPass);
+    
+    // Bloom - subtle glow on bright areas
+    const bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(window.innerWidth, window.innerHeight),
+        0.3,    // strength
+        0.4,    // radius
+        0.85    // threshold
+    );
+    composer.addPass(bloomPass);
+    
+    // Output pass (gamma correction)
+    const outputPass = new OutputPass();
+    composer.addPass(outputPass);
 
     // ============================================
     // WAREHOUSE GEOMETRY
@@ -831,7 +871,7 @@
             }
         }
         
-        renderer.render(scene, camera);
+        composer.render();
     }
 
     function updateFreeroam(delta) {
@@ -963,9 +1003,15 @@
     // WINDOW RESIZE
     // ============================================
     window.addEventListener('resize', () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        
+        camera.aspect = width / height;
         camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
+        
+        renderer.setSize(width, height);
+        composer.setSize(width, height);
+        ssaoPass.setSize(width, height);
     });
 
     // ============================================
