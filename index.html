@@ -208,8 +208,136 @@
     import { OutputPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/OutputPass.js';
     import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js';
     
-    // GLTF loader for future model imports
+    // GLTF loader for model imports
     import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+
+    // ============================================
+    // LEVEL LOADER (Blender → Three.js + Rapier)
+    // ============================================
+    // Naming convention:
+    //   floor_*, wall_*, static_*  → trimesh collider (static)
+    //   crate_*, dynamic_*         → box collider (dynamic, physics)
+    //   trigger_*                  → no render, trigger zone
+    //   prop_*, decor_*, light_*   → no collision (visual only)
+    //
+    // Or use Blender custom properties:
+    //   collider: "trimesh" | "box" | "convex" | "none"
+    //   physics: "static" | "dynamic"
+    
+    const gltfLoader = new GLTFLoader();
+    
+    async function loadLevel(url) {
+        return new Promise((resolve, reject) => {
+            gltfLoader.load(url, (gltf) => {
+                const levelObjects = [];
+                
+                gltf.scene.traverse((child) => {
+                    if (!child.isMesh) return;
+                    
+                    const name = child.name.toLowerCase();
+                    const userData = child.userData || {};
+                    
+                    // Determine collider type from name or custom property
+                    let colliderType = userData.collider || 'none';
+                    let physicsType = userData.physics || 'static';
+                    
+                    // Parse naming convention
+                    if (name.startsWith('floor_') || name.startsWith('wall_') || name.startsWith('static_')) {
+                        colliderType = 'trimesh';
+                        physicsType = 'static';
+                    } else if (name.startsWith('crate_') || name.startsWith('dynamic_')) {
+                        colliderType = 'box';
+                        physicsType = 'dynamic';
+                    } else if (name.startsWith('trigger_')) {
+                        colliderType = 'trigger';
+                        child.visible = false;
+                    }
+                    
+                    // Enable shadows
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    
+                    levelObjects.push({
+                        mesh: child,
+                        colliderType,
+                        physicsType,
+                        name: child.name
+                    });
+                });
+                
+                // Add to scene
+                scene.add(gltf.scene);
+                
+                resolve({ scene: gltf.scene, objects: levelObjects });
+            }, undefined, reject);
+        });
+    }
+    
+    function createCollidersFromLevel(levelObjects) {
+        if (!world) return;
+        
+        for (const obj of levelObjects) {
+            if (obj.colliderType === 'none') continue;
+            
+            const mesh = obj.mesh;
+            mesh.updateMatrixWorld(true);
+            
+            // Get world position, rotation, scale
+            const position = new THREE.Vector3();
+            const quaternion = new THREE.Quaternion();
+            const scale = new THREE.Vector3();
+            mesh.matrixWorld.decompose(position, quaternion, scale);
+            
+            if (obj.colliderType === 'trimesh' && obj.physicsType === 'static') {
+                // Create trimesh collider from geometry
+                const geo = mesh.geometry;
+                const vertices = new Float32Array(geo.attributes.position.array);
+                const indices = geo.index ? new Uint32Array(geo.index.array) : null;
+                
+                // Apply scale to vertices
+                for (let i = 0; i < vertices.length; i += 3) {
+                    vertices[i] *= scale.x;
+                    vertices[i + 1] *= scale.y;
+                    vertices[i + 2] *= scale.z;
+                }
+                
+                const colliderDesc = RAPIER.ColliderDesc.trimesh(vertices, indices)
+                    .setTranslation(position.x, position.y, position.z)
+                    .setRotation({ x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w });
+                world.createCollider(colliderDesc);
+                
+            } else if (obj.colliderType === 'box') {
+                // Get bounding box
+                const box = new THREE.Box3().setFromObject(mesh);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                
+                if (obj.physicsType === 'dynamic') {
+                    // Dynamic crate
+                    const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+                        .setTranslation(position.x, position.y, position.z)
+                        .setRotation({ x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w });
+                    const rigidBody = world.createRigidBody(rigidBodyDesc);
+                    
+                    const colliderDesc = RAPIER.ColliderDesc.cuboid(size.x/2, size.y/2, size.z/2)
+                        .setDensity(1.0)
+                        .setFriction(0.5)
+                        .setRestitution(0.2);
+                    world.createCollider(colliderDesc, rigidBody);
+                    
+                    const physObj = { mesh, rigidBody, size: Math.max(size.x, size.y, size.z), originalY: position.y, hasFallen: false };
+                    physicsObjects.push(physObj);
+                    mesh.userData.physicsObject = physObj;
+                } else {
+                    // Static box
+                    const colliderDesc = RAPIER.ColliderDesc.cuboid(size.x/2, size.y/2, size.z/2)
+                        .setTranslation(position.x, position.y, position.z)
+                        .setRotation({ x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w });
+                    world.createCollider(colliderDesc);
+                }
+            }
+        }
+    }
 
     // ============================================
     // GAME STATE
