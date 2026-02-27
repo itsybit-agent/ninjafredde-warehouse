@@ -226,7 +226,7 @@
         velocity: new THREE.Vector3(),
         onGround: true,
         holding: null,  // { mesh, rigidBody, size }
-        throwCooldown: 0
+        actionCooldown: 0  // Prevents pickup -> immediate throw
     };
 
     // ============================================
@@ -485,9 +485,11 @@
     }
     
     function pickUp(obj) {
-        if (player.holding) return;
+        if (player.holding || player.actionCooldown > 0) return;
         
         player.holding = obj;
+        player.actionCooldown = 0.3; // Prevent immediate throw
+        
         // Make the crate kinematic while held
         obj.rigidBody.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased);
         
@@ -496,11 +498,11 @@
     }
     
     function throwObject() {
-        if (!player.holding) return;
+        if (!player.holding || player.actionCooldown > 0) return;
         
         const obj = player.holding;
         player.holding = null;
-        player.throwCooldown = 0.3;
+        player.actionCooldown = 0.3;
         
         // Make it dynamic again
         obj.rigidBody.setBodyType(RAPIER.RigidBodyType.Dynamic);
@@ -807,8 +809,8 @@
             }
             
             // Throw cooldown
-            if (player.throwCooldown > 0) {
-                player.throwCooldown -= delta;
+            if (player.actionCooldown > 0) {
+                player.actionCooldown -= delta;
             }
         }
         
@@ -843,16 +845,20 @@
         desiredX += right.x * movement.right * speed;
         desiredZ += right.z * movement.right * speed;
         
-        // Ground check (simple: if y velocity is ~0 and low position)
+        // Ground check using raycast
         const pos = playerBody.translation();
-        player.onGround = pos.y < 1.8 && Math.abs(vel.y) < 0.5;
+        const rayOrigin = { x: pos.x, y: pos.y, z: pos.z };
+        const rayDir = { x: 0, y: -1, z: 0 };
+        const ray = new RAPIER.Ray(rayOrigin, rayDir);
+        const hit = world.castRay(ray, 1.2, true); // Check 1.2 units down
+        player.onGround = hit !== null && hit.toi < 1.1;
         
         // Jump
         let newVelY = vel.y;
         if (movement.jump && player.onGround) {
-            newVelY = 8; // Jump impulse
-            movement.jump = false; // Consume jump
+            newVelY = 10; // Jump impulse
         }
+        movement.jump = false; // Always consume to prevent holding
         
         // Apply velocity
         playerBody.setLinvel({ x: desiredX, y: newVelY, z: desiredZ }, true);
