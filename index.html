@@ -181,7 +181,7 @@
         <div id="crosshair" class="hidden"></div>
         <div id="instructions" class="hidden">
             WASD - Move | SPACE - Jump | SHIFT - Run<br>
-            Mouse - Look | LMB - Pick up / Throw<br>
+            LMB - Pick up / Drop | RMB - Throw<br>
             ESC - Menu
         </div>
         
@@ -473,7 +473,7 @@
     }
 
     // ============================================
-    // PICK UP / THROW
+    // PICK UP / DROP / THROW
     // ============================================
     function getTargetCrate() {
         raycaster.setFromCamera(screenCenter, camera);
@@ -488,66 +488,73 @@
         if (player.holding || player.actionCooldown > 0) return;
         
         player.holding = obj;
-        player.actionCooldown = 0.3; // Prevent immediate throw
+        player.actionCooldown = 0.25;
         
-        // Make the crate kinematic while held
-        obj.rigidBody.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased);
+        // Remove from physics simulation entirely while held
+        obj.rigidBody.setEnabled(false);
         
         document.getElementById('crosshair').classList.add('holding');
         narrate('pickup');
     }
     
-    function throwObject() {
+    function dropObject() {
+        // Just drop - no force
         if (!player.holding || player.actionCooldown > 0) return;
-        
+        releaseObject(0, 0);
+    }
+    
+    function throwObject() {
+        // Throw with force
+        if (!player.holding || player.actionCooldown > 0) return;
+        releaseObject(18, 4);
+        narrate('throw');
+    }
+    
+    function releaseObject(force, upward) {
         const obj = player.holding;
         player.holding = null;
-        player.actionCooldown = 0.3;
+        player.actionCooldown = 0.2;
         
-        // Make it dynamic again
-        obj.rigidBody.setBodyType(RAPIER.RigidBodyType.Dynamic);
-        
-        // Get throw direction from camera
+        // Get position in front of camera
         const dir = new THREE.Vector3();
         camera.getWorldDirection(dir);
+        const releasePos = camera.position.clone().add(dir.clone().multiplyScalar(1.5));
+        releasePos.y -= 0.2;
         
-        // Apply impulse
-        const throwForce = 15;
-        obj.rigidBody.applyImpulse(
-            { x: dir.x * throwForce, y: dir.y * throwForce + 3, z: dir.z * throwForce },
-            true
-        );
+        // Re-enable physics and set position
+        obj.rigidBody.setEnabled(true);
+        obj.rigidBody.setTranslation({ x: releasePos.x, y: releasePos.y, z: releasePos.z }, true);
+        obj.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        obj.rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
         
-        // Add some spin
-        obj.rigidBody.applyTorqueImpulse(
-            { x: Math.random() - 0.5, y: Math.random() - 0.5, z: Math.random() - 0.5 },
-            true
-        );
+        // Apply throw force if any
+        if (force > 0) {
+            obj.rigidBody.applyImpulse(
+                { x: dir.x * force, y: dir.y * force + upward, z: dir.z * force },
+                true
+            );
+            obj.rigidBody.applyTorqueImpulse(
+                { x: (Math.random() - 0.5) * 2, y: (Math.random() - 0.5) * 2, z: (Math.random() - 0.5) * 2 },
+                true
+            );
+        }
         
         document.getElementById('crosshair').classList.remove('holding');
-        narrate('throw');
     }
     
     function updateHeldObject() {
         if (!player.holding) return;
         
+        // Move the mesh directly (physics is disabled)
         const dir = new THREE.Vector3();
         camera.getWorldDirection(dir);
         
-        // Position in front of camera
-        const holdDistance = 1.5;
+        const holdDistance = 1.8;
         const holdPos = camera.position.clone().add(dir.multiplyScalar(holdDistance));
-        holdPos.y -= 0.3; // Slightly below eye level
+        holdPos.y -= 0.2;
         
-        player.holding.rigidBody.setNextKinematicTranslation({
-            x: holdPos.x, y: holdPos.y, z: holdPos.z
-        });
-        
-        // Rotate with camera
-        const quat = camera.quaternion;
-        player.holding.rigidBody.setNextKinematicRotation({
-            x: quat.x, y: quat.y, z: quat.z, w: quat.w
-        });
+        player.holding.mesh.position.copy(holdPos);
+        player.holding.mesh.quaternion.copy(camera.quaternion);
     }
 
     // ============================================
@@ -591,16 +598,26 @@
 
     document.addEventListener('mousedown', (e) => {
         if (!state.playing || !isLocked) return;
-        if (e.button !== 0) return; // LMB only
         
-        if (player.holding) {
-            throwObject();
-        } else {
-            const target = getTargetCrate();
-            if (target) {
-                pickUp(target);
+        if (e.button === 0) { // LMB - pickup or drop
+            if (player.holding) {
+                dropObject();
+            } else {
+                const target = getTargetCrate();
+                if (target) {
+                    pickUp(target);
+                }
+            }
+        } else if (e.button === 2) { // RMB - throw
+            if (player.holding) {
+                throwObject();
             }
         }
+    });
+    
+    // Prevent context menu on RMB
+    renderer.domElement.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
     });
 
     document.addEventListener('pointerlockchange', () => {
